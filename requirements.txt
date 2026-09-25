@@ -3,3 +3,8 @@ Use pip install -r requirements.txt
 numpy
 jax
 jaxlib
+
+If pip still not working use 
+```
+python -m pip install jax jaxlib
+```

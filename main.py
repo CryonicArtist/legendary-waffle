@@ -5,67 +5,60 @@ from jax import random
 from core.forecast import run_forecast
 from assimilation.update import update_weights
 from assimilation.resample import resample_particles
-from pricer.black_scholes import black_scholes_price
+from pricer.batch_greeks import compute_ensemble_greeks
+from signals.mispricing import evaluate_arbitrage_signal
 
 def main():
-    # 1. Configuration
+    # Configuration
     num_particles = 10000
-    dt = 1.0 / (252.0 * 390.0)  # 1-minute time steps
+    dt = 1.0 / (252.0 * 390.0)
     steps = 5
     
-    # Option Contract Specs: ATM Call option, 3 months (0.25 yr) to expiry
-    K = 100.0       # Strike Price
-    T = 0.25        # Time to Expiration (Years)
-    r = 0.05        # 5% Risk-free rate
-    option_type = 1.0 # 1.0 = Call Option
-    
-    # Heston Parameters: [mu, kappa, theta, xi, rho]
+    # Contract specs
+    K, T, r, option_type = 100.0, 0.25, 0.05, 1.0
     params = jnp.array([0.05, 2.0, 0.04, 0.1, -0.7])
     
-    # Initialize state: [Spot = $100.0, Volatility = 0.04 (20% annualized vol)]
     key = random.PRNGKey(42)
     particles = jnp.ones((num_particles, 2)) * jnp.array([100.0, 0.04])
     weights = jnp.ones(num_particles) / num_particles
     
-    # Calculate baseline option price at starting state
-    base_price = black_scholes_price(jnp.array([100.0, 0.04]), K, T, r, option_type)
-    print(f"Booting Option Data Assimilation Filter. N={num_particles} Particles.")
-    print(f"Tracking Call Option (K={K}, T={T}yr). Theoretical Base Price: ${base_price:.3f}\n")
+    # Simulated market stream containing an artificial mispricing at Step 4 ($5.20 vs expected ~$4.79)
+    simulated_ticks = [4.616, 4.670, 4.720, 5.200, 4.850]
     
-    # 2. Live Trading Loop (Simulating live option market quotes)
-    # Market option ticks rise from $4.61 up to $4.85 due to underlying movement/vol shift
-    simulated_option_ticks = [4.616, 4.670, 4.720, 4.790, 4.850]
+    print(f"Booting DA Engine with Real-Time AAD Greeks & Arbitrage Signals.\n")
     
     for t in range(steps):
-        print(f"--- Time Step {t+1} ---")
+        print(f"=== Time Step {t+1} ===")
+        market_tick = simulated_ticks[t]
         
-        # A. Forecast Step: Push ensemble forward via Heston SDE
+        # 1. Forecast Step
         particles, key = run_forecast(key, particles, params, dt, num_particles)
         
-        # B. Ingest Live Option Quote
-        market_option_tick = simulated_option_ticks[t]
-        
-        # C. Assimilation Step: Update particle weights using option price likelihood
-        # Observation noise variance (accounts for bid-ask bounce/spread noise)
-        observation_variance = 0.0005 
-        weights = update_weights(
-            particles, weights, market_option_tick, observation_variance, K, T, r, option_type
+        # 2. Evaluate Arbitrage Signal BEFORE Assimilation
+        exp_price, std_dev, z_score, signal = evaluate_arbitrage_signal(
+            particles, weights, market_tick, K, T, r, option_type, z_threshold=2.0
         )
         
-        # D. Check Degeneracy & Resample
-        ess = 1.0 / jnp.sum(weights**2)
-        print(f"Option Market Tick: ${market_option_tick:.3f} | ESS: {ess:.0f}/{num_particles}")
+        sig_str = "BUY (Underpriced)" if signal == 1.0 else ("SELL (Overpriced)" if signal == -1.0 else "HOLD (Fair)")
+        print(f"Market Tick: ${market_tick:.3f} | Model Exp: ${exp_price:.3f} ± ${std_dev:.3f}")
+        print(f"Mispricing Z-Score: {z_score:+.2f} | Action Signal: {sig_str}")
         
+        # 3. Data Assimilation Step
+        observation_variance = 0.002  # Loosened slightly to reduce sample impoverishment
+        weights = update_weights(
+            particles, weights, market_tick, observation_variance, K, T, r, option_type
+        )
+        
+        # 4. Check ESS and Resample
+        ess = 1.0 / jnp.sum(weights**2)
         if ess < (num_particles / 2.0):
-            print("Degeneracy detected. Resampling particles...")
             particles, weights, key = resample_particles(key, particles, weights)
             
-        # E. Extract Latent State (Posterior expected Spot & Vol)
-        expected_spot = jnp.sum(particles[:, 0] * weights)
-        expected_vol = jnp.sum(particles[:, 1] * weights)
-        implied_annual_vol = jnp.sqrt(expected_vol) * 100
+        # 5. Calculate Real-Time Ensemble Greeks via JAX AAD
+        greeks = compute_ensemble_greeks(particles, weights, K, T, r, option_type)
+        delta, gamma, vega = greeks[0], greeks[1], greeks[2]
         
-        print(f"Latent State -> Extracted Spot: ${expected_spot:.2f} | Extracted Vol: {implied_annual_vol:.2f}%\n")
+        print(f"Ensemble Greeks -> Delta: {delta:.4f} | Gamma: {gamma:.4f} | Vega: {vega:.4f}\n")
 
 if __name__ == "__main__":
     main()

@@ -2,55 +2,70 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
-# Import modularized functions
 from core.forecast import run_forecast
 from assimilation.update import update_weights
 from assimilation.resample import resample_particles
+from pricer.black_scholes import black_scholes_price
 
 def main():
     # 1. Configuration
     num_particles = 10000
-    dt = 1.0 / (252.0 * 390.0) # 1-minute steps
-    steps = 5 # Simulating 5 minutes of live order book ticks
+    dt = 1.0 / (252.0 * 390.0)  # 1-minute time steps
+    steps = 5
     
-    # Parameters: [mu, kappa, theta, xi, rho]
+    # Option Contract Specs: ATM Call option, 3 months (0.25 yr) to expiry
+    K = 100.0       # Strike Price
+    T = 0.25        # Time to Expiration (Years)
+    r = 0.05        # 5% Risk-free rate
+    option_type = 1.0 # 1.0 = Call Option
+    
+    # Heston Parameters: [mu, kappa, theta, xi, rho]
     params = jnp.array([0.05, 2.0, 0.04, 0.1, -0.7])
     
-    # Initialize PRNG key and state
+    # Initialize state: [Spot = $100.0, Volatility = 0.04 (20% annualized vol)]
     key = random.PRNGKey(42)
-    particles = jnp.ones((num_particles, 2)) * jnp.array([100.0, 0.04]) # [Spot, Vol]
+    particles = jnp.ones((num_particles, 2)) * jnp.array([100.0, 0.04])
     weights = jnp.ones(num_particles) / num_particles
     
-    print(f"Booting Particle Filter. N={num_particles} Particles.\n")
+    # Calculate baseline option price at starting state
+    base_price = black_scholes_price(jnp.array([100.0, 0.04]), K, T, r, option_type)
+    print(f"Booting Option Data Assimilation Filter. N={num_particles} Particles.")
+    print(f"Tracking Call Option (K={K}, T={T}yr). Theoretical Base Price: ${base_price:.3f}\n")
     
-    # 2. The Trading / Assimilation Loop
+    # 2. Live Trading Loop (Simulating live option market quotes)
+    # Market option ticks rise from $4.61 up to $4.85 due to underlying movement/vol shift
+    simulated_option_ticks = [4.616, 4.670, 4.720, 4.790, 4.850]
+    
     for t in range(steps):
         print(f"--- Time Step {t+1} ---")
         
-        # A. Forecast Step (Drive SDE forward)
+        # A. Forecast Step: Push ensemble forward via Heston SDE
         particles, key = run_forecast(key, particles, params, dt, num_particles)
         
-        # B. Receive Live Market Tick (Simulated here as 100.05, 100.12, etc.)
-        # In production, this pulls from Databento/Polygon websocket
-        simulated_market_tick = 100.0 + (t * 0.05) 
+        # B. Ingest Live Option Quote
+        market_option_tick = simulated_option_ticks[t]
         
-        # C. Update Step (Data Assimilation)
-        observation_variance = 0.01
-        weights = update_weights(particles, weights, simulated_market_tick, observation_variance)
+        # C. Assimilation Step: Update particle weights using option price likelihood
+        # Observation noise variance (accounts for bid-ask bounce/spread noise)
+        observation_variance = 0.0005 
+        weights = update_weights(
+            particles, weights, market_option_tick, observation_variance, K, T, r, option_type
+        )
         
-        # Calculate Effective Sample Size (ESS) to check for degeneracy
+        # D. Check Degeneracy & Resample
         ess = 1.0 / jnp.sum(weights**2)
-        print(f"Market Tick: {simulated_market_tick:.2f} | ESS: {ess:.0f}/{num_particles}")
+        print(f"Option Market Tick: ${market_option_tick:.3f} | ESS: {ess:.0f}/{num_particles}")
         
-        # D. Resample if degenerate (e.g., ESS drops below 50%)
         if ess < (num_particles / 2.0):
             print("Degeneracy detected. Resampling particles...")
             particles, weights, key = resample_particles(key, particles, weights)
             
-        # E. Calculate Expected State (Mean of the posterior distribution)
+        # E. Extract Latent State (Posterior expected Spot & Vol)
         expected_spot = jnp.sum(particles[:, 0] * weights)
         expected_vol = jnp.sum(particles[:, 1] * weights)
-        print(f"Latent State Update -> Spot: {expected_spot:.2f}, Vol: {expected_vol:.4f}\n")
+        implied_annual_vol = jnp.sqrt(expected_vol) * 100
+        
+        print(f"Latent State -> Extracted Spot: ${expected_spot:.2f} | Extracted Vol: {implied_annual_vol:.2f}%\n")
 
 if __name__ == "__main__":
     main()

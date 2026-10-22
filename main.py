@@ -19,7 +19,11 @@ def main():
     params = jnp.array([0.05, 2.0, 0.04, 0.1, -0.7])
     
     key = random.PRNGKey(42)
-    particles = jnp.ones((num_particles, 2)) * jnp.array([100.0, 0.04])
+    # Dispersed particle initialization (S ~ N(100, 0.5^2), v ~ LogNormal(0.04, 0.15^2))
+    key, subkey_s, subkey_v = random.split(key, 3)
+    init_spot = 100.0 + random.normal(subkey_s, (num_particles,)) * 0.5
+    init_vol = 0.04 * jnp.exp(random.normal(subkey_v, (num_particles,)) * 0.15)
+    particles = jnp.stack([init_spot, init_vol], axis=1)
     weights = jnp.ones(num_particles) / num_particles
     
     chain_stream = [

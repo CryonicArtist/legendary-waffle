@@ -3,11 +3,11 @@ from jax import jit
 from pricer.batch_pricer import evaluate_particles_option_surface
 
 @jit
-def update_weights(particles, current_weights, market_mids, bid_ask_spreads, strikes, z_scores, T, r, option_type=1.0, gamma=0.15):
+def update_weights(particles, current_weights, market_mids, bid_ask_spreads, strikes, z_scores, T, r, option_type=1.0, gamma=0.05):
     """
     Updates particle weights with likelihood tempering (gamma) to maintain ensemble diversity.
     """
-    model_risk_var = 0.002
+    model_risk_var = 0.015
     obs_variances = jnp.maximum((bid_ask_spreads / 2.0)**2, 1e-6) + model_risk_var
     
     mask = jnp.abs(z_scores) < 4.0

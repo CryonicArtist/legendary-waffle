@@ -2,22 +2,11 @@ import jax.numpy as jnp
 from jax.scipy.stats import norm
 
 def black_scholes_price(state, K, T, r, option_type=1.0):
-    """
-    Computes the Black-Scholes price for a single particle's state [S, v].
+    S = jnp.maximum(state[0], 1.0)
+    v = jnp.maximum(state[1], 1e-6)
+    sigma = jnp.sqrt(v)
     
-    Parameters:
-    - state: jnp.array([S, v]) where S is spot, v is variance
-    - K: Strike price
-    - T: Time to maturity (years)
-    - r: Risk-free rate
-    - option_type: 1.0 for Call, -1.0 for Put
-    """
-    S, v = state
-    # Ensure variance is non-negative and non-zero
-    v_pos = jnp.maximum(v, 1e-8)
-    sigma = jnp.sqrt(v_pos)
-    
-    std_dev = sigma * jnp.sqrt(T)
+    std_dev = jnp.maximum(sigma * jnp.sqrt(T), 1e-6)
     d1 = (jnp.log(S / K) + (r + 0.5 * sigma**2) * T) / std_dev
     d2 = d1 - std_dev
     

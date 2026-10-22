@@ -1,22 +1,27 @@
-from jax import vmap, random
+import jax.numpy as jnp
+from jax import jit, random, vmap
 from core.heston import heston_step
-from jax import jit
 
-# Vectorize over particles (axis 0). Keep params and dt un-batched (None)
-batch_heston_step = vmap(heston_step, in_axes=(0, None, 0, 0, None))
-
-@jit
-def run_forecast(key, particles, params, dt, num_particles):
+@jit(static_argnums=(4,))
+def run_forecast(key, particles, params, dt, num_particles=10000):
     """
-    Drives the entire ensemble of particles forward simultaneously.
+    Pushes particle ensemble forward by dt via Heston SDE.
+    Marked static_argnums=(4,) so JAX compiles shape parameters as concrete constants.
     """
+    # Infer concrete shape dimension directly from array shape
+    N = particles.shape[0]
+    
     key, subkey1, subkey2 = random.split(key, 3)
     
-    # Generate random shocks for the whole batch
-    dW_S = random.normal(subkey1, (num_particles,))
-    dW_v = random.normal(subkey2, (num_particles,))
+    # Generate correlated normal random variates
+    dW_S = random.normal(subkey1, (N,))
+    dW_v_raw = random.normal(subkey2, (N,))
     
-    # Push batch forward
-    new_particles = batch_heston_step(particles, params, dW_S, dW_v, dt)
+    rho = params[4]
+    dW_v = rho * dW_S + jnp.sqrt(1.0 - rho**2) * dW_v_raw
     
-    return new_particles, key
+    # Vectorize single-step Heston execution across all N particles
+    batch_heston = vmap(heston_step, in_axes=(0, None, None, 0, 0))
+    updated_particles = batch_heston(particles, params, dt, dW_S, dW_v)
+    
+    return updated_particles, key

@@ -1,6 +1,8 @@
 import jax.numpy as jnp
 from pricer.batch_pricer import evaluate_particles_option_surface
+from jax import jit
 
+@jit
 def evaluate_surface_arbitrage_signals(particles, weights, market_mids, strikes, T, r, option_type=1.0, z_threshold=2.0):
     """
     Evaluates statistical mispricings across an entire option chain vector Y_t.

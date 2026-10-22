@@ -1,10 +1,12 @@
 import jax.numpy as jnp
 from jax import vmap
 from pricer.greeks import single_particle_greeks
+from jax import jit
 
 # Vectorize over particles (axis 0 of state)
 batch_greeks_fn = vmap(single_particle_greeks, in_axes=(0, None, None, None, None))
 
+@jit
 def compute_ensemble_greeks(particles, weights, K, T, r, option_type=1.0):
     """
     Computes weighted ensemble averages for Delta, Gamma, and Vega across all particles.

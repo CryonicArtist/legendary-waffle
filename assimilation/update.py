@@ -1,6 +1,8 @@
 import jax.numpy as jnp
 from pricer.batch_pricer import evaluate_particles_option_surface
+from jax import jit
 
+@jit
 def update_weights(particles, current_weights, market_mids, bid_ask_spreads, strikes, z_scores, T, r, option_type=1.0):
     """
     Updates particle weights using a vector of option chain quotes Y_t and dynamic noise R_t.

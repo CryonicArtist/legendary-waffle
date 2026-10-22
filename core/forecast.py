@@ -1,9 +1,11 @@
 from jax import vmap, random
 from core.heston import heston_step
+from jax import jit
 
 # Vectorize over particles (axis 0). Keep params and dt un-batched (None)
 batch_heston_step = vmap(heston_step, in_axes=(0, None, 0, 0, None))
 
+@jit
 def run_forecast(key, particles, params, dt, num_particles):
     """
     Drives the entire ensemble of particles forward simultaneously.

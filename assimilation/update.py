@@ -21,5 +21,9 @@ def update_weights(particles, current_weights, market_option_price, observation_
     # Prevent divide-by-zero numerical instability
     safe_sum = jnp.where(weight_sum < 1e-12, 1e-12, weight_sum)
     new_weights = unnormalized_weights / safe_sum
+
+    # Prevent likelihood underflow
+    likelihoods = jnp.exp(-0.5 * (innovations**2) / observation_noise_variance)
+    likelihoods = jnp.maximum(likelihoods, 1e-12) # Numerical floor
     
     return new_weights

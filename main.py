@@ -38,16 +38,15 @@ def main():
         exp_price, std_dev, z_score, signal = evaluate_arbitrage_signal(
             particles, weights, market_tick, K, T, r, option_type, z_threshold=2.0
         )
-        
-        sig_str = "BUY (Underpriced)" if signal == 1.0 else ("SELL (Overpriced)" if signal == -1.0 else "HOLD (Fair)")
-        print(f"Market Tick: ${market_tick:.3f} | Model Exp: ${exp_price:.3f} ± ${std_dev:.3f}")
-        print(f"Mispricing Z-Score: {z_score:+.2f} | Action Signal: {sig_str}")
-        
-        # 3. Data Assimilation Step
-        observation_variance = 0.002  # Loosened slightly to reduce sample impoverishment
-        weights = update_weights(
-            particles, weights, market_tick, observation_variance, K, T, r, option_type
-        )
+
+        # 3. Data Assimilation Step (GATED)
+        # If the market tick is a massive outlier (|Z| > 4.0), trade it, but DO NOT assimilate it!
+        if jnp.abs(z_score) < 4.0:
+            weights = update_weights(
+                particles, weights, market_tick, observation_variance, K, T, r, option_type
+            )
+        else:
+            print(f">> Outlier Quote Detected (|Z| = {z_score:.2f}). Trade executed; bypassing filter state update.")
         
         # 4. Check ESS and Resample
         ess = 1.0 / jnp.sum(weights**2)

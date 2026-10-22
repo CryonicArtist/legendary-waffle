@@ -17,6 +17,7 @@ def main():
     # Contract specs
     K, T, r, option_type = 100.0, 0.25, 0.05, 1.0
     params = jnp.array([0.05, 2.0, 0.04, 0.1, -0.7])
+    observation_variance = 0.002  # Defined globally for loop
     
     key = random.PRNGKey(42)
     particles = jnp.ones((num_particles, 2)) * jnp.array([100.0, 0.04])
@@ -25,7 +26,7 @@ def main():
     # Simulated market stream containing an artificial mispricing at Step 4 ($5.20 vs expected ~$4.79)
     simulated_ticks = [4.616, 4.670, 4.720, 5.200, 4.850]
     
-    print(f"Booting DA Engine with Real-Time AAD Greeks & Arbitrage Signals.\n")
+    print("Booting DA Engine with Real-Time AAD Greeks & Outlier-Gated Signals.\n")
     
     for t in range(steps):
         print(f"=== Time Step {t+1} ===")
@@ -38,15 +39,18 @@ def main():
         exp_price, std_dev, z_score, signal = evaluate_arbitrage_signal(
             particles, weights, market_tick, K, T, r, option_type, z_threshold=2.0
         )
-
-        # 3. Data Assimilation Step (GATED)
-        # If the market tick is a massive outlier (|Z| > 4.0), trade it, but DO NOT assimilate it!
+        
+        sig_str = "BUY (Underpriced)" if signal == 1.0 else ("SELL (Overpriced)" if signal == -1.0 else "HOLD (Fair)")
+        print(f"Market Tick: ${market_tick:.3f} | Model Exp: ${exp_price:.3f} ± ${std_dev:.3f}")
+        print(f"Mispricing Z-Score: {z_score:+.2f} | Action Signal: {sig_str}")
+        
+        # 3. Data Assimilation Step (Gated against severe outliers)
         if jnp.abs(z_score) < 4.0:
             weights = update_weights(
                 particles, weights, market_tick, observation_variance, K, T, r, option_type
             )
         else:
-            print(f">> Outlier Quote Detected (|Z| = {z_score:.2f}). Trade executed; bypassing filter state update.")
+            print(f">> OUTLIER DETECTED (|Z| = {z_score:.2f}). Trade executed; bypassing filter state update.")
         
         # 4. Check ESS and Resample
         ess = 1.0 / jnp.sum(weights**2)

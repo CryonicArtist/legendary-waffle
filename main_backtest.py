@@ -25,7 +25,7 @@ async def run_backtest():
     buffer = MarketDataBuffer(num_strikes=5)
     portfolio = PortfolioManager(initial_cash=100_000.0)
     router = ExecutionRouter(portfolio, max_trade_size=5.0)
-    replayer = HistoricalTickReplayer(buffer, num_ticks=15)
+    replayer = HistoricalTickReplayer(buffer, num_ticks=20)
     
     # Initialize particles
     key, subkey_s, subkey_v = random.split(key, 3)
@@ -47,16 +47,22 @@ async def run_backtest():
     print("\n--- Starting Phase 5 Backtest Execution Loop ---")
     step = 0
     pnl_history = []
+    empty_polls = 0
 
     while step < 15:
         mids, spreads, has_data = await buffer.pop_tick()
         if not has_data:
+            empty_polls += 1
+            if empty_polls > 50:  # Timeout if no ticks arrive after 50ms
+                print("\nReplayer stream completed.")
+                break
             await asyncio.sleep(0.001)
             continue
             
+        empty_polls = 0  # Reset on valid tick
         step += 1
         t_start = time.perf_counter()
-
+        
         # 1. DA Forecast & Signal Evaluation
         particles, key = run_forecast(key, particles, params, dt, num_particles)
         exp_prices, std_devs, z_scores, signals = evaluate_surface_arbitrage_signals(

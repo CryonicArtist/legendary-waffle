@@ -23,8 +23,8 @@ def resample_and_regularize(key, particles, weights, a=0.98):
 
     # VARIANCE FLOOR: Force minimum jitter (Spot std >= $0.25, Vol std >= 0.005)
     # This prevents zero-jitter locks when sample_var collapses
-    min_var = jnp.array([0.25**2, 0.005**2])
-    effective_var = jnp.maximum(sample_var, min_var)
+    min_var = jnp.array([0.05**2, 0.002**2])
+    effective_var = sample_var * 0.1
 
     # Shrink centers toward mean: m_i = a * x_i + (1 - a) * mean
     shrunk_centers = a * resampled_particles + (1.0 - a) * mean

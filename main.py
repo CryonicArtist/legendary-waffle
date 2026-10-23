@@ -22,9 +22,12 @@ async def run_trading_engine(buffer: MarketDataBuffer, strikes: jnp.ndarray, key
     params = jnp.array([0.05, 2.0, 0.04, 0.1, -0.7])
     
     # Dispersed particle initialization
+    # Tighter initial particle dispersion (S ~ N(100.0, 0.05^2), v ~ LogNormal(0.04, 0.05^2))
     key, subkey_s, subkey_v = random.split(key, 3)
-    init_spot = 100.0 + random.normal(subkey_s, (num_particles,)) * 0.5
-    init_vol = 0.04 * jnp.exp(random.normal(subkey_v, (num_particles,)) * 0.15)
+    # In main.py (run_trading_engine):
+    # Set initial variance v_0 = 0.04 (which corresponds to 20% volatility: sqrt(0.04) = 0.20)
+    init_spot = 100.0 + random.normal(subkey_s, (num_particles,)) * 0.05
+    init_vol = 0.04 * jnp.exp(random.normal(subkey_v, (num_particles,)) * 0.05)
     particles = jnp.stack([init_spot, init_vol], axis=1)
     weights = jnp.ones(num_particles) / num_particles
 

@@ -3,8 +3,8 @@ from jax.scipy.stats import norm
 
 def black_scholes_price(state, K, T, r, option_type=1.0):
     S = jnp.maximum(state[0], 1.0)
-    v = jnp.maximum(state[1], 1e-6)
-    sigma = jnp.sqrt(v)
+    v = jnp.maximum(state[1], 1e-6)  # state[1] is variance (0.04)
+    sigma = jnp.sqrt(v)              # sigma becomes 0.20
     
     std_dev = jnp.maximum(sigma * jnp.sqrt(T), 1e-6)
     d1 = (jnp.log(S / K) + (r + 0.5 * sigma**2) * T) / std_dev

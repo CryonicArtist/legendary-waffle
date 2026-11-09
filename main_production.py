@@ -29,7 +29,7 @@ async def run_production_engine():
     telemetry = EngineTelemetryExporter()
     
     dataset_path = "ticks_sample.parquet"
-    strikes = stream_mgr.transfer_to_device(jnp.array([90.0, 95.0, 100.0, 105.0, 110.0]))
+    strikes = stream_mgr.transfer_to_device(jnp.linspace(80.0, 120.0, 25))
     key = random.PRNGKey(2026)
     
     # 1. Connect Broker Gateway
@@ -56,7 +56,7 @@ async def run_production_engine():
     )
 
     # 3. Particle Ensemble Setup
-    num_particles = 10000
+    num_particles = 100000
     dt = 1.0 / (252.0 * 390.0)
     T, r, option_type = 0.25, 0.05, 1.0
     

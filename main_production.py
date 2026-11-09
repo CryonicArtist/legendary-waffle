@@ -38,7 +38,7 @@ def create_sample_parquet_dataset(file_path: str, strikes: jnp.ndarray):
             strike_cols.append(k)
             spots.append(100.0)
             
-            # Simple synthetic ATM-centered option price approximation
+            # Synthetic ATM-centered option price curve
             dist_from_atm = abs(k - 100.0)
             mid = max(12.0 - 0.45 * dist_from_atm, 0.10)
             
@@ -67,7 +67,7 @@ async def run_production_engine():
     stream_mgr = CUDAStreamManager()
     telemetry = EngineTelemetryExporter()
     
-    # --- GPU Stress Test Setup: 100k Particles & 25 Strikes ---
+    # Dynamic Setup: 100,000 Particles & 25 Strikes
     num_particles = 100000
     strikes = stream_mgr.transfer_to_device(jnp.linspace(80.0, 120.0, 25))
     num_strikes = len(strikes)
@@ -77,31 +77,31 @@ async def run_production_engine():
     
     key = random.PRNGKey(2026)
     
-    # Connect Live Paper Broker
+    # 1. Connect Broker API Gateway
     broker = LivePaperBroker(simulated_rtt_ms=10.0)
     await broker.connect()
     await broker.subscribe_quotes(strikes)
 
-    # Initialize Buffer and Portfolio matching dynamic strike length
+    # 2. Setup Ring Buffer and Portfolio
     buffer = MarketDataBuffer(num_strikes=num_strikes)
     replayer = ParquetTickReplayer(buffer, dataset_path, strikes)
     replay_task = asyncio.create_task(replayer.stream_ticks(playback_speed_ms=15.0))
     
-    # Wait for first live tick frame
+    # Wait for first tick frame
     while True:
         mids, spreads, has_data = await buffer.pop_tick()
         if has_data:
             break
         await asyncio.sleep(0.002)
 
-    # Surface Calibration
+    # 3. Surface Prior Calibration
     print("\n[PRODUCTION] Calibrating Heston Surface Prior...")
     calibrator = HestonSurfaceCalibrator(num_steps=200)
     calibrated_params, calibrated_v0 = calibrator.calibrate(
         spot=100.0, strikes=strikes, market_mids=mids, T=0.25, r=0.05, option_type=1.0
     )
 
-    # Particle Ensemble Setup
+    # 4. Particle Ensemble Initialization
     dt = 1.0 / (252.0 * 390.0)
     T, r, option_type = 0.25, 0.05, 1.0
     
@@ -111,12 +111,29 @@ async def run_production_engine():
     particles = stream_mgr.transfer_to_device(jnp.stack([init_spot, init_vol], axis=1))
     weights = stream_mgr.transfer_to_device(jnp.ones(num_particles) / num_particles)
 
-    # Instantiate Portfolio with matching num_strikes
     portfolio = PortfolioManager(num_strikes=num_strikes, initial_cash=100_000.0)
     risk_manager = RiskLimitManager(max_portfolio_delta=50.0, max_drawdown_pct=2.0)
     microstructure = MicrostructureModel(impact_factor=0.02)
 
-    print("\n--- Starting Phase 9 Production Execution Loop ---")
+    # 5. Full XLA JIT Warm-Up (Forces pre-compilation of Resampling & Greeks)
+    print("\nExecuting Comprehensive XLA GPU Warm-Up (including Resampling)...")
+    t_warmup = time.perf_counter()
+    mids_dev = stream_mgr.transfer_to_device(mids)
+    spreads_dev = stream_mgr.transfer_to_device(spreads)
+    
+    p_dummy, k_dummy = run_forecast(key, particles, calibrated_params, dt, num_particles)
+    exp_p, std_d, z_sc, sigs = evaluate_surface_arbitrage_signals(
+        p_dummy, weights, mids_dev, strikes, T, r, option_type, z_threshold=2.0
+    )
+    w_dummy = update_weights(p_dummy, weights, mids_dev, spreads_dev, strikes, z_sc, T, r, option_type)
+    
+    # Pre-compile resampling pass explicitly
+    p_dummy, w_dummy, k_dummy = resample_and_regularize(k_dummy, p_dummy, w_dummy, a=0.98)
+    g_dummy = compute_ensemble_greeks(p_dummy, w_dummy, 100.0, T, r, option_type)
+    g_dummy.block_until_ready()
+    print(f"XLA GPU Warm-Up Complete in {(time.perf_counter() - t_warmup)*1000:.2f} ms.\n")
+
+    print("--- Starting Phase 9 Production Execution Loop ---")
     step = 0
     pnl_history = []
     latency_history = []
@@ -133,10 +150,10 @@ async def run_production_engine():
         mids_dev = stream_mgr.transfer_to_device(mids)
         spreads_dev = stream_mgr.transfer_to_device(spreads)
 
-        # 1. SDE Forecast Step
+        # 1. SDE Particle Forecast
         particles, key = run_forecast(key, particles, calibrated_params, dt, num_particles)
 
-        # 2. Surface Pricing & Signals
+        # 2. Surface Pricing & Mispricing Signals
         exp_prices, std_devs, z_scores, signals = evaluate_surface_arbitrage_signals(
             particles, weights, mids_dev, strikes, T, r, option_type, z_threshold=2.0
         )
@@ -153,8 +170,9 @@ async def run_production_engine():
         greeks = compute_ensemble_greeks(particles, weights, 100.0, T, r, option_type)
         greeks.block_until_ready()
 
-        # 6. Signal Execution & Delta Hedging
+        # 6. Parallel Signal Execution & Broker Order Routing
         current_spot = float(jnp.sum(particles[:, 0] * weights))
+        order_tasks = []
         
         for i in range(len(signals)):
             sig = signals[i]
@@ -170,9 +188,17 @@ async def run_production_engine():
                 )
                 side_str = "BUY" if exec_qty > 0 else "SELL"
                 
-                await broker.send_order("SPY", float(strikes[i]), side_str, abs(exec_qty), price=fill_price)
+                # Collect async broker orders for concurrent execution
+                order_tasks.append(
+                    broker.send_order("SPY", float(strikes[i]), side_str, abs(exec_qty), price=fill_price)
+                )
                 portfolio.execute_option_trade(strike_idx=i, qty=exec_qty, fill_price=fill_price)
 
+        # Dispatch all strike orders simultaneously over network
+        if order_tasks:
+            await asyncio.gather(*order_tasks)
+
+        # 7. Underlying Equity Delta Rebalance
         net_option_delta = float(jnp.sum(portfolio.option_positions) * greeks[0])
         portfolio.rebalance_delta_hedge(net_option_delta, current_spot)
         

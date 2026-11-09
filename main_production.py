@@ -13,7 +13,7 @@ from assimilation.resample import resample_and_regularize
 from pricer.batch_greeks import compute_ensemble_greeks
 from signals.mispricing import evaluate_surface_arbitrage_signals
 from ingest.ring_buffer import MarketDataBuffer
-from ingest.websocket_stream import PolygonWebSocketStreamer
+from ingest.simulated_stream import SimulatedLiveStreamer
 from connectors.paper_broker import LivePaperBroker
 from execution.portfolio import PortfolioManager
 from execution.microstructure import MicrostructureModel
@@ -36,27 +36,18 @@ async def run_production_engine():
     
     key = random.PRNGKey(2026)
     
-    # 2. Connect Broker Order Gateway
+    # 1. Connect Broker Order Gateway
     broker = LivePaperBroker(simulated_rtt_ms=10.0)
     await broker.connect()
     await broker.subscribe_quotes(strikes)
 
-    # 3. Initialize Ring Buffer and Live WebSocket Ingestion Worker
+    # 2. Initialize zero-cost live streamer
     buffer = MarketDataBuffer(num_strikes=num_strikes)
-    api_key = os.getenv("POLYGON_API_KEY", "YOUR_POLYGON_API_KEY")
-
-    streamer = PolygonWebSocketStreamer(
-        buffer=buffer,
-        api_key=api_key,
-        underlying="SPY",
-        expiry_yymmdd="261218",  # Target option expiration
-        strikes=strikes,
-        option_type="C"
-    )
+    streamer = SimulatedLiveStreamer(buffer=buffer, strikes=strikes, tick_interval_sec=0.05)
     ws_task = asyncio.create_task(streamer.start_stream())
 
-    # 4. Await first live valid quote frame
-    print("\n>> Awaiting initial live market quotes from WebSocket...")
+    # 3. Await first live valid quote frame
+    print("\n>> Awaiting initial live market quotes from Streamer...")
     while True:
         mids, spreads, has_data = await buffer.pop_tick()
         if has_data and float(jnp.sum(mids)) > 0:
@@ -64,14 +55,14 @@ async def run_production_engine():
             break
         await asyncio.sleep(0.01)
 
-    # 5. Surface Prior Calibration on Live Market Quotes
+    # 4. Surface Prior Calibration on Live Market Quotes
     print("\n[PRODUCTION] Calibrating Heston Surface Prior to Live Market Chain...")
     calibrator = HestonSurfaceCalibrator(num_steps=200)
     calibrated_params, calibrated_v0 = calibrator.calibrate(
         spot=510.0, strikes=strikes, market_mids=mids, T=0.25, r=0.05, option_type=1.0
     )
 
-    # 6. Particle Ensemble Initialization
+    # 5. Particle Ensemble Initialization
     dt = 1.0 / (252.0 * 390.0)
     T, r, option_type = 0.25, 0.05, 1.0
     
@@ -85,8 +76,8 @@ async def run_production_engine():
     risk_manager = RiskLimitManager(max_portfolio_delta=50.0, max_drawdown_pct=2.0)
     microstructure = MicrostructureModel(impact_factor=0.02)
 
-    # 7. Comprehensive XLA JIT Warm-Up
-    print("\nExecuting Comprehensive XLA GPU Warm-Up...")
+    # 6. Comprehensive XLA JIT Warm-Up
+    print("\nExecuting Comprehensive XLA Warm-Up...")
     t_warmup = time.perf_counter()
     mids_dev = stream_mgr.transfer_to_device(mids)
     spreads_dev = stream_mgr.transfer_to_device(spreads)
@@ -99,14 +90,13 @@ async def run_production_engine():
     p_dummy, w_dummy, k_dummy = resample_and_regularize(k_dummy, p_dummy, w_dummy, a=0.98)
     g_dummy = compute_ensemble_greeks(p_dummy, w_dummy, 510.0, T, r, option_type)
     g_dummy.block_until_ready()
-    print(f"XLA GPU Warm-Up Complete in {(time.perf_counter() - t_warmup)*1000:.2f} ms.\n")
+    print(f"XLA Warm-Up Complete in {(time.perf_counter() - t_warmup)*1000:.2f} ms.\n")
 
     print("--- Starting Phase 9 Live Production Execution Loop ---")
     step = 0
     pnl_history = []
     latency_history = []
 
-    # Run indefinitely or for target tick count during market hours
     while step < 100:
         mids, spreads, has_data = await buffer.pop_tick()
         if not has_data:

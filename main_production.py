@@ -1,7 +1,6 @@
 import asyncio
 import time
 import os
-import pandas as pd
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -14,7 +13,7 @@ from assimilation.resample import resample_and_regularize
 from pricer.batch_greeks import compute_ensemble_greeks
 from signals.mispricing import evaluate_surface_arbitrage_signals
 from ingest.ring_buffer import MarketDataBuffer
-from ingest.parquet_loader import ParquetTickReplayer
+from ingest.websocket_stream import PolygonWebSocketStreamer
 from connectors.paper_broker import LivePaperBroker
 from execution.portfolio import PortfolioManager
 from execution.microstructure import MicrostructureModel
@@ -22,91 +21,62 @@ from risk.limits import RiskLimitManager
 from telemetry.metrics_exporter import EngineTelemetryExporter
 from backtest.metrics import generate_performance_report
 
-def create_sample_parquet_dataset(file_path: str, strikes: jnp.ndarray):
-    """Generates a dynamic multi-strike option tick dataset matching target strikes."""
-    timestamps = []
-    strike_cols = []
-    bids = []
-    asks = []
-    spots = []
-    
-    strikes_list = [float(k) for k in strikes]
-    
-    for t in range(25):
-        for k in strikes_list:
-            timestamps.append(t)
-            strike_cols.append(k)
-            spots.append(100.0)
-            
-            # Synthetic ATM-centered option price curve
-            dist_from_atm = abs(k - 100.0)
-            mid = max(12.0 - 0.45 * dist_from_atm, 0.10)
-            
-            # Inject transient mispricing at t=6 for strike K=105
-            if t == 6 and abs(k - 105.0) < 0.5:
-                mid = 3.25
-                
-            bids.append(mid - 0.03)
-            asks.append(mid + 0.03)
-            
-    df = pd.DataFrame({
-        'timestamp': timestamps,
-        'strike': strike_cols,
-        'bid': bids,
-        'ask': asks,
-        'spot': spots
-    })
-    df.to_parquet(file_path)
-    print(f">> Created Dynamic Parquet Dataset ({len(strikes_list)} strikes): {file_path}")
-
 async def run_production_engine():
     print("==================================================")
-    print("  LAUNCHING QUANTITATIVE OPTIONS ENGINE (PHASE 9) ")
+    print("  LAUNCHING QUANTITATIVE OPTIONS ENGINE (LIVE WS) ")
     print("==================================================")
 
     stream_mgr = CUDAStreamManager()
     telemetry = EngineTelemetryExporter()
     
-    # Dynamic Setup: 100,000 Particles & 25 Strikes
-    num_particles = 100000
-    strikes = stream_mgr.transfer_to_device(jnp.linspace(80.0, 120.0, 25))
+    # CPU Production Tuning (Sub-15ms Real-Time Response)
+    num_particles = 10000
+    strikes = stream_mgr.transfer_to_device(jnp.linspace(500.0, 520.0, 5))
     num_strikes = len(strikes)
-    
-    dataset_path = "ticks_sample.parquet"
-    create_sample_parquet_dataset(dataset_path, strikes)
     
     key = random.PRNGKey(2026)
     
-    # 1. Connect Broker API Gateway
+    # 2. Connect Broker Order Gateway
     broker = LivePaperBroker(simulated_rtt_ms=10.0)
     await broker.connect()
     await broker.subscribe_quotes(strikes)
 
-    # 2. Setup Ring Buffer and Portfolio
+    # 3. Initialize Ring Buffer and Live WebSocket Ingestion Worker
     buffer = MarketDataBuffer(num_strikes=num_strikes)
-    replayer = ParquetTickReplayer(buffer, dataset_path, strikes)
-    replay_task = asyncio.create_task(replayer.stream_ticks(playback_speed_ms=15.0))
-    
-    # Wait for first tick frame
+    api_key = os.getenv("POLYGON_API_KEY", "YOUR_POLYGON_API_KEY")
+
+    streamer = PolygonWebSocketStreamer(
+        buffer=buffer,
+        api_key=api_key,
+        underlying="SPY",
+        expiry_yymmdd="261218",  # Target option expiration
+        strikes=strikes,
+        option_type="C"
+    )
+    ws_task = asyncio.create_task(streamer.start_stream())
+
+    # 4. Await first live valid quote frame
+    print("\n>> Awaiting initial live market quotes from WebSocket...")
     while True:
         mids, spreads, has_data = await buffer.pop_tick()
-        if has_data:
+        if has_data and float(jnp.sum(mids)) > 0:
+            print(">> Valid market quote frame received.")
             break
-        await asyncio.sleep(0.002)
+        await asyncio.sleep(0.01)
 
-    # 3. Surface Prior Calibration
-    print("\n[PRODUCTION] Calibrating Heston Surface Prior...")
+    # 5. Surface Prior Calibration on Live Market Quotes
+    print("\n[PRODUCTION] Calibrating Heston Surface Prior to Live Market Chain...")
     calibrator = HestonSurfaceCalibrator(num_steps=200)
     calibrated_params, calibrated_v0 = calibrator.calibrate(
-        spot=100.0, strikes=strikes, market_mids=mids, T=0.25, r=0.05, option_type=1.0
+        spot=510.0, strikes=strikes, market_mids=mids, T=0.25, r=0.05, option_type=1.0
     )
 
-    # 4. Particle Ensemble Initialization
+    # 6. Particle Ensemble Initialization
     dt = 1.0 / (252.0 * 390.0)
     T, r, option_type = 0.25, 0.05, 1.0
     
     key, subkey_s, subkey_v = random.split(key, 3)
-    init_spot = 100.0 + random.normal(subkey_s, (num_particles,)) * 0.05
+    init_spot = 510.0 + random.normal(subkey_s, (num_particles,)) * 0.05
     init_vol = calibrated_v0 * jnp.exp(random.normal(subkey_v, (num_particles,)) * 0.05)
     particles = stream_mgr.transfer_to_device(jnp.stack([init_spot, init_vol], axis=1))
     weights = stream_mgr.transfer_to_device(jnp.ones(num_particles) / num_particles)
@@ -115,8 +85,8 @@ async def run_production_engine():
     risk_manager = RiskLimitManager(max_portfolio_delta=50.0, max_drawdown_pct=2.0)
     microstructure = MicrostructureModel(impact_factor=0.02)
 
-    # 5. Full XLA JIT Warm-Up (Forces pre-compilation of Resampling & Greeks)
-    print("\nExecuting Comprehensive XLA GPU Warm-Up (including Resampling)...")
+    # 7. Comprehensive XLA JIT Warm-Up
+    print("\nExecuting Comprehensive XLA GPU Warm-Up...")
     t_warmup = time.perf_counter()
     mids_dev = stream_mgr.transfer_to_device(mids)
     spreads_dev = stream_mgr.transfer_to_device(spreads)
@@ -126,19 +96,18 @@ async def run_production_engine():
         p_dummy, weights, mids_dev, strikes, T, r, option_type, z_threshold=2.0
     )
     w_dummy = update_weights(p_dummy, weights, mids_dev, spreads_dev, strikes, z_sc, T, r, option_type)
-    
-    # Pre-compile resampling pass explicitly
     p_dummy, w_dummy, k_dummy = resample_and_regularize(k_dummy, p_dummy, w_dummy, a=0.98)
-    g_dummy = compute_ensemble_greeks(p_dummy, w_dummy, 100.0, T, r, option_type)
+    g_dummy = compute_ensemble_greeks(p_dummy, w_dummy, 510.0, T, r, option_type)
     g_dummy.block_until_ready()
     print(f"XLA GPU Warm-Up Complete in {(time.perf_counter() - t_warmup)*1000:.2f} ms.\n")
 
-    print("--- Starting Phase 9 Production Execution Loop ---")
+    print("--- Starting Phase 9 Live Production Execution Loop ---")
     step = 0
     pnl_history = []
     latency_history = []
 
-    while step < 15:
+    # Run indefinitely or for target tick count during market hours
+    while step < 100:
         mids, spreads, has_data = await buffer.pop_tick()
         if not has_data:
             await asyncio.sleep(0.001)
@@ -150,27 +119,27 @@ async def run_production_engine():
         mids_dev = stream_mgr.transfer_to_device(mids)
         spreads_dev = stream_mgr.transfer_to_device(spreads)
 
-        # 1. SDE Particle Forecast
+        # Step A: SDE Forecast
         particles, key = run_forecast(key, particles, calibrated_params, dt, num_particles)
 
-        # 2. Surface Pricing & Mispricing Signals
+        # Step B: Surface Pricing & Arbitrage Z-score Signals
         exp_prices, std_devs, z_scores, signals = evaluate_surface_arbitrage_signals(
             particles, weights, mids_dev, strikes, T, r, option_type, z_threshold=2.0
         )
 
-        # 3. Likelihood Weight Update
+        # Step C: Likelihood Weight Update
         weights = update_weights(particles, weights, mids_dev, spreads_dev, strikes, z_scores, T, r, option_type)
         
-        # 4. ESS Check & Resampling
+        # Step D: ESS Check & Resampling
         ess = float(1.0 / jnp.sum(weights**2))
         if ess < (num_particles / 2.0):
             particles, weights, key = resample_and_regularize(key, particles, weights, a=0.98)
 
-        # 5. Pathwise AAD Greeks
-        greeks = compute_ensemble_greeks(particles, weights, 100.0, T, r, option_type)
+        # Step E: Pathwise AAD Greeks
+        greeks = compute_ensemble_greeks(particles, weights, 510.0, T, r, option_type)
         greeks.block_until_ready()
 
-        # 6. Parallel Signal Execution & Broker Order Routing
+        # Step F: Concurrent Signal Order Routing
         current_spot = float(jnp.sum(particles[:, 0] * weights))
         order_tasks = []
         
@@ -188,17 +157,15 @@ async def run_production_engine():
                 )
                 side_str = "BUY" if exec_qty > 0 else "SELL"
                 
-                # Collect async broker orders for concurrent execution
                 order_tasks.append(
                     broker.send_order("SPY", float(strikes[i]), side_str, abs(exec_qty), price=fill_price)
                 )
                 portfolio.execute_option_trade(strike_idx=i, qty=exec_qty, fill_price=fill_price)
 
-        # Dispatch all strike orders simultaneously over network
         if order_tasks:
             await asyncio.gather(*order_tasks)
 
-        # 7. Underlying Equity Delta Rebalance
+        # Step G: Delta Neutral Rebalance
         net_option_delta = float(jnp.sum(portfolio.option_positions) * greeks[0])
         portfolio.rebalance_delta_hedge(net_option_delta, current_spot)
         
@@ -212,8 +179,11 @@ async def run_production_engine():
         telemetry.record_tick(latency_us, ess, pnl)
         telemetry.print_system_status(step)
 
-    replay_task.cancel()
-    print("\nProduction Engine Simulation Concluded.")
+    # Graceful Shutdown
+    streamer.stop_stream()
+    ws_task.cancel()
+    
+    print("\nLive Engine Session Concluded.")
     generate_performance_report(pnl_history, latency_history, portfolio.initial_cash)
 
 if __name__ == "__main__":

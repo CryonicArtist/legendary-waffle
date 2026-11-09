@@ -146,11 +146,21 @@ async def run_production_engine():
                     qty=trade_qty, mid_price=float(mids[i]), spread=float(spreads[i])
                 )
                 side_str = "BUY" if exec_qty > 0 else "SELL"
+                order_id = f"ORD_{step:04d}_{i}"
                 
                 order_tasks.append(
                     broker.send_order("SPY", float(strikes[i]), side_str, abs(exec_qty), price=fill_price)
                 )
-                portfolio.execute_option_trade(strike_idx=i, qty=exec_qty, fill_price=fill_price)
+                
+                # Updated call with full tracking metadata
+                portfolio.execute_option_trade(
+                    step=step,
+                    order_id=order_id,
+                    strike_idx=i,
+                    strike_val=float(strikes[i]),
+                    qty=exec_qty,
+                    fill_price=fill_price
+                )
 
         if order_tasks:
             await asyncio.gather(*order_tasks)
@@ -174,6 +184,18 @@ async def run_production_engine():
     ws_task.cancel()
     
     print("\nLive Engine Session Concluded.")
+    generate_performance_report(pnl_history, latency_history, portfolio.initial_cash)
+
+# --- Graceful Shutdown & CSV Export ---
+    streamer.stop_stream()
+    ws_task.cancel()
+    
+    print("\nLive Engine Session Concluded.")
+    
+    # Export CSV files
+    telemetry.export_to_csv("telemetry_metrics.csv")
+    portfolio.export_trades_to_csv("trade_history.csv")
+    
     generate_performance_report(pnl_history, latency_history, portfolio.initial_cash)
 
 if __name__ == "__main__":

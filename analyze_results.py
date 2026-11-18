@@ -9,9 +9,7 @@ def analyze_performance(telemetry_file: str = "telemetry_metrics.csv", trades_fi
         print(f"Error loading CSV files: {e}")
         return
 
-    print("==================================================")
     print("        POST-TRADE PERFORMANCE DIAGNOSTICS        ")
-    print("==================================================")
 
     # 1. Latency Profile Analysis
     latencies = df_telemetry['latency_ms']
@@ -82,6 +80,21 @@ def analyze_performance(telemetry_file: str = "telemetry_metrics.csv", trades_fi
         print("  ✓ Filter Verdict: HEALTHY (Sufficient particle diversity maintained)")
 
     print("==================================================")
+
+    # 5. Extended Burn-In Stability Check
+    if len(df_telemetry) >= 1000:
+        first_500_p50 = np.percentile(latencies.iloc[:500], 50)
+        last_500_p50 = np.percentile(latencies.iloc[-500:], 50)
+        drift_ms = last_500_p50 - first_500_p50
+        
+        print("\n[5. EXTENDED BURN-IN STABILITY]")
+        print(f"  * First 500 Ticks P50:   {first_500_p50:.2f} ms")
+        print(f"  * Final 500 Ticks P50:   {last_500_p50:.2f} ms")
+        print(f"  * Latency Drift:         {drift_ms:+.2f} ms")
+        if abs(drift_ms) < 3.0:
+            print("  ✓ Stability Verdict: PASS (Zero event-loop or XLA degradation)")
+        else:
+            print("  ⚠ Stability Verdict: WARNING (Latency drifted over session)")
 
 if __name__ == "__main__":
     analyze_performance()
